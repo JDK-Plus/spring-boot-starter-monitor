@@ -4,8 +4,8 @@ import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 @Data
-@ConfigurationProperties(prefix = "plus.jdk.monitor.memory")
-public class MonitorMemoryProperties {
+@ConfigurationProperties(prefix = "plus.jdk.monitor.garbage")
+public class MonitorGarbageProperties {
 
     /**
      * 是否开启该组件

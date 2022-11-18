@@ -5,20 +5,21 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.SmartLifecycle;
 
 @Slf4j
-public class MemoryMonitorLifecycle implements SmartLifecycle {
+public class GarbageMonitorLifecycle implements SmartLifecycle {
 
     private boolean running = false;
 
-    private final MemoryMonitorDispatcher memoryMonitorDispatcher;
+    private final GarbageMonitorDispatcher garbageMonitorDispatcher;
 
-    public MemoryMonitorLifecycle(MemoryMonitorDispatcher memoryMonitorDispatcher) {
-        this.memoryMonitorDispatcher = memoryMonitorDispatcher;
+    public GarbageMonitorLifecycle(GarbageMonitorDispatcher garbageMonitorDispatcher) {
+        this.garbageMonitorDispatcher = garbageMonitorDispatcher;
     }
 
     @SneakyThrows
     @Override
     public void start() {
-        memoryMonitorDispatcher.findMemoryDotCallbackService();
+        garbageMonitorDispatcher.findGarbageDotCallbackService();
+        garbageMonitorDispatcher.registerGarbageNotificationListener();
         running = true;
     }
 

@@ -11,5 +11,5 @@ import java.lang.annotation.Target;
 @Import(JVMMemoryMonitorSelector.class)
 @Target({ElementType.TYPE})
 @Retention(RetentionPolicy.RUNTIME)
-public @interface EnableMonitor {
+public @interface EnableMemoryMonitor {
 }

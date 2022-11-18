@@ -1,39 +1,23 @@
 package plus.jdk.monitor.global;
-
-import com.sun.tools.attach.VirtualMachine;
 import lombok.NoArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.io.IOUtils;
 import org.springframework.context.ApplicationContext;
 import org.springframework.scheduling.Trigger;
 import org.springframework.scheduling.annotation.SchedulingConfigurer;
 import org.springframework.scheduling.config.ScheduledTaskRegistrar;
 import org.springframework.scheduling.support.PeriodicTrigger;
 import org.springframework.util.CollectionUtils;
-import plus.jdk.monitor.annotation.MemoryMonitorDotCompont;
-import plus.jdk.monitor.common.IMonitorMemoryDotCallback;
+import plus.jdk.monitor.annotation.MonitorDotComponent;
+import plus.jdk.monitor.common.IMemoryDotCallback;
 import plus.jdk.monitor.model.MemoryDotModel;
 import plus.jdk.monitor.properties.MonitorMemoryProperties;
-import sun.jvmstat.monitor.*;
-import sun.tools.attach.HotSpotVirtualMachine;
-
-import javax.management.MBeanServerConnection;
-import javax.management.remote.JMXConnector;
-import javax.management.remote.JMXConnectorFactory;
-import javax.management.remote.JMXServiceURL;
-import java.io.File;
-import java.io.InputStream;
+import java.lang.management.*;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryPoolMXBean;
 import java.lang.management.MemoryType;
 import java.lang.management.MemoryUsage;
-import java.net.URISyntaxException;
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Properties;
-import java.util.Set;
-import java.util.concurrent.TimeUnit;
+import java.lang.reflect.Method;
+import java.util.*;
 
 @Slf4j
 @NoArgsConstructor
@@ -45,10 +29,6 @@ public class MemoryMonitorDispatcher implements SchedulingConfigurer {
 
     private final List<MemoryDotModel> memoryDotModels = new ArrayList<>();
 
-    private String currentProcessId = null;
-
-    private String currentProcessJMXUri = null;
-
     public MemoryMonitorDispatcher(MonitorMemoryProperties monitorMemoryProperties,
                                    ApplicationContext applicationContext) {
         this.monitorMemoryProperties = monitorMemoryProperties;
@@ -57,33 +37,25 @@ public class MemoryMonitorDispatcher implements SchedulingConfigurer {
 
     public void monitorDot() {
         for (MemoryDotModel memoryDotModel : memoryDotModels) {
-            try{
-                doMemoryDot(memoryPoolMXBean -> memoryDotModel.getDotCallback().doDot(memoryPoolMXBean));
-            }catch (Exception | Error e) {
+            try {
+                doMemoryDot(memoryPoolMXBean -> memoryDotModel.getDotCallback().doMonitorDot(memoryPoolMXBean));
+            } catch (Exception | Error e) {
                 e.printStackTrace();
                 log.error("{}", e.getMessage());
             }
         }
     }
 
-    public void initProcessInfo() throws ClassNotFoundException {
-        if(currentProcessId != null) {
-            return;
-        }
-        Class<?> mainClass = getMainClass();
-        currentProcessId = getProcessId(mainClass);
-        currentProcessJMXUri = bindJMXAgentAndGetJMXUri(currentProcessId);
-    }
 
-    public void findDotCallbackService() {
-        if(!CollectionUtils.isEmpty(memoryDotModels)) {
+    public void findMemoryDotCallbackService() {
+        if (!CollectionUtils.isEmpty(memoryDotModels)) {
             return;
         }
         String[] beanNames =
-                this.applicationContext.getBeanNamesForAnnotation(MemoryMonitorDotCompont.class);
+                this.applicationContext.getBeanNamesForType(IMemoryDotCallback.class);
         for (String beanName : beanNames) {
-            IMonitorMemoryDotCallback dotCallback = this.applicationContext.getBean(beanName, IMonitorMemoryDotCallback.class);
-            MemoryMonitorDotCompont dotService = this.applicationContext.findAnnotationOnBean(beanName, MemoryMonitorDotCompont.class);
+            IMemoryDotCallback dotCallback = this.applicationContext.getBean(beanName, IMemoryDotCallback.class);
+            MonitorDotComponent dotService = this.applicationContext.findAnnotationOnBean(beanName, MonitorDotComponent.class);
             if (dotService == null) {
                 continue;
             }
@@ -91,112 +63,14 @@ public class MemoryMonitorDispatcher implements SchedulingConfigurer {
         }
     }
 
-    public static String getStack(String pid) {
-        VirtualMachine virtualMachine = null;
-        InputStream is = null;
-        try {
-            virtualMachine = VirtualMachine.attach(pid);
-            HotSpotVirtualMachine machine = (HotSpotVirtualMachine) virtualMachine;
-            is = machine.remoteDataDump(new String[]{});
-            return IOUtils.toString(is, StandardCharsets.UTF_8.name());
-        } catch (Exception e) {
-            e.printStackTrace();
-        } finally {
-            IOUtils.closeQuietly(is);
-        }
-        return null;
-    }
 
-    public String heapHisto(String pid) {
-        VirtualMachine virtualMachine = null;
-        InputStream is = null;
-        try {
-            virtualMachine = VirtualMachine.attach(pid);
-            HotSpotVirtualMachine machine = (HotSpotVirtualMachine) virtualMachine;
-            is = machine.heapHisto(new String[]{});
-            return IOUtils.toString(is, StandardCharsets.UTF_8.name());
-        } catch (Exception e) {
-            e.printStackTrace();
-        } finally {
-            IOUtils.closeQuietly(is);
+    public void doMemoryDot(IMemoryDotCallback callback) {
+        List<MemoryPoolMXBean> memoryPoolMXBeans = ManagementFactory.getMemoryPoolMXBeans();
+        for (MemoryPoolMXBean memoryPoolMXBean : memoryPoolMXBeans) {
+            try {
+                callback.doMonitorDot(memoryPoolMXBean);
+            } catch (Exception | Error ignored) {}
         }
-        return null;
-    }
-
-    public void doMemoryDot(IMonitorMemoryDotCallback callback) {
-        doMemoryDot(currentProcessJMXUri, callback);
-    }
-
-    public void doMemoryDot(String jmxAddress,IMonitorMemoryDotCallback callback) {
-        try {
-            JMXServiceURL target = new JMXServiceURL(jmxAddress);
-            final JMXConnector connector = JMXConnectorFactory.connect(target);
-            final MBeanServerConnection mBeanServerConnection = connector.getMBeanServerConnection();
-            TimeUnit.SECONDS.sleep(1);
-            List<MemoryPoolMXBean> memoryPoolMXBeans = ManagementFactory.getPlatformMXBeans(mBeanServerConnection, MemoryPoolMXBean.class);
-            for (MemoryPoolMXBean memoryPoolMXBean : memoryPoolMXBeans) {
-                try {
-                    callback.doDot(memoryPoolMXBean);
-                } catch (Exception | Error ignored) {
-                }
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-
-    public synchronized String bindJMXAgentAndGetJMXUri(String pid) {
-        VirtualMachine virtualMachine = null;
-        try {
-            virtualMachine = VirtualMachine.attach(pid);
-//            HotSpotVirtualMachine machine = (HotSpotVirtualMachine) virtualMachine;
-            String javaHome = virtualMachine.getSystemProperties().getProperty("java.home");
-            String jmxAgent = String.join(File.separator, new String[]{javaHome, "lib", "management-agent.jar"});
-            virtualMachine.loadAgent(jmxAgent, "com.sun.management.jmxremote");
-            Properties properties = virtualMachine.getAgentProperties();
-            String address = (String) properties.get("com.sun.management.jmxremote.localConnectorAddress");
-            virtualMachine.detach();
-            return address;
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-        return null;
-    }
-
-    public String getProcessId(Class<?> mainClass) {
-        MonitoredHost monitoredHost;
-        Set<Integer> activeVmProcessIds;
-        try {
-            monitoredHost = MonitoredHost.getMonitoredHost(new HostIdentifier((String) null));
-            activeVmProcessIds = monitoredHost.activeVms();
-            MonitoredVm mvm = null;
-            for (Integer vmPid : activeVmProcessIds) {
-                try {
-                    mvm = monitoredHost.getMonitoredVm(new VmIdentifier(vmPid.toString()));
-                    String mvmMainClass = MonitoredVmUtil.mainClass(mvm, true);
-                    if (mainClass.getName().equals(mvmMainClass)) {
-                        return String.valueOf(vmPid);
-                    }
-                } finally {
-                    if (mvm != null) {
-                        mvm.detach();
-                    }
-                }
-            }
-        } catch (URISyntaxException | MonitorException e) {
-            throw new InternalError(e.getMessage());
-        }
-        return null;
-    }
-
-    public Class<?> getMainClass() throws ClassNotFoundException {
-        StackTraceElement[] stackTraceElements = new RuntimeException().getStackTrace();
-        for (StackTraceElement stackTraceElement : stackTraceElements) {
-            if ("main".equals(stackTraceElement.getMethodName())) {
-                return Class.forName(stackTraceElement.getClassName());
-            }
-        }
-        return null;
     }
 
     @Override
@@ -207,25 +81,200 @@ public class MemoryMonitorDispatcher implements SchedulingConfigurer {
     }
 
     public static void main(String[] args) throws ClassNotFoundException {
-        MemoryMonitorDispatcher dispatcher = new MemoryMonitorDispatcher();
-        String pid = String.valueOf(dispatcher.getProcessId(dispatcher.getMainClass()));
-        String jxmAddress = dispatcher.bindJMXAgentAndGetJMXUri(pid);
-        dispatcher.doMemoryDot(jxmAddress, (memoryPoolMXBean) -> {
-            String name = memoryPoolMXBean.getName();
+        /**
+         * 操作系统
+         */
+        System.out.println("*****************操作系统模块*****************");
+        OperatingSystemMXBean os = ManagementFactory.getOperatingSystemMXBean();
+        // 获得JVM可用处理器数量
+        int availableProcessors = os.getAvailableProcessors();
+        // 操作系统的架构
+        String arch = os.getArch();
+        // 操作系统的名称
+        String name = os.getName();
+        // 操作系统上一分钟的平均负载
+        double sysLoadAverage = os.getSystemLoadAverage();
+        // 操作系统的版本
+        String version = os.getVersion();
+        System.out.println("操作系统的架构为：" + arch + "\n名称为：" + name + "\n版本为：" + version + "\n平均负载为：" + sysLoadAverage + "\nJVM可用处理器数量为：" + availableProcessors + "\n对象名为:" + os.getObjectName().toString());
+        System.out.println();
+
+        /**
+         * 类加载器
+         */
+        System.out.println("*****************类加载器模块*****************");
+        ClassLoadingMXBean classLoadingMXBean = ManagementFactory.getClassLoadingMXBean();
+        // 已加载类的总数
+        long loadedClassCount = classLoadingMXBean.getLoadedClassCount();
+        // 加载类的总数
+        long totalLoadedClassCount = classLoadingMXBean.getTotalLoadedClassCount();
+        // 未加载类的总数
+        long unloadedClassCount = classLoadingMXBean.getUnloadedClassCount();
+        System.out.println("加载类的总数为：" + totalLoadedClassCount + "\n已加载类的总数为：" + loadedClassCount + "\n未加载类的总数为：" + unloadedClassCount + "\n对象名为:" + classLoadingMXBean.getObjectName().toString());
+        System.out.println();
+
+        /**
+         * 编译器
+         */
+        System.out.println("*****************编译器模块*****************");
+        CompilationMXBean compilationMXBean = ManagementFactory.getCompilationMXBean();
+        // JIT编译器的名称
+        String compilationName = compilationMXBean.getName();
+        // 总的编译时间
+        long compilationTime = compilationMXBean.getTotalCompilationTime();
+        // JVM 是否支持编译器监控
+        boolean isCompilationTimeMonitoringSupported = compilationMXBean.isCompilationTimeMonitoringSupported();
+        System.out.println("编译器名称为：" + compilationName + "\n总的编译时间为：" + compilationTime + "\n是否支持编译时间监控：" + isCompilationTimeMonitoringSupported + "\n对象名为:" + compilationMXBean.getObjectName().toString());
+        System.out.println();
+
+        /**
+         * 收集器
+         */
+        System.out.println("*****************收集器模块*****************");
+        List<GarbageCollectorMXBean> garbageCollectorMXBeanList = ManagementFactory.getGarbageCollectorMXBeans();
+        for (GarbageCollectorMXBean garbageCollectorMXBean : garbageCollectorMXBeanList) {
+            // 已经回收的次数
+            long collectionCount = garbageCollectorMXBean.getCollectionCount();
+            // 以毫秒为单位的近似累积回收时间
+            long collectionTime = garbageCollectorMXBean.getCollectionTime();
+            // 内存管理器管理的内存池的名称
+            String[] memoryNames = garbageCollectorMXBean.getMemoryPoolNames();
+            // 收集器的名称
+            String garbageCollectorName = garbageCollectorMXBean.getName();
+            System.out.println("回收次数为：" + collectionCount + "\n累积回收时间为：" + collectionTime + "\n内存池名称为：" + (memoryNames) + "\n收集器名称为：" + garbageCollectorName + "\n对象名为：" + garbageCollectorMXBean.getObjectName());
+            System.out.println();
+        }
+        System.out.println();
+
+        /**
+         * 内存管理模块
+         */
+        System.out.println("*****************内存管理模块*****************");
+        List<MemoryManagerMXBean> memoryManagerMXBeanList = ManagementFactory.getMemoryManagerMXBeans();
+        for (MemoryManagerMXBean memoryManagerMXBean : memoryManagerMXBeanList) {
+            // 内存管理器管理的内存池的名称
+            String[] memoryPoolNames = memoryManagerMXBean.getMemoryPoolNames();
+            // 当前的内存管理器
+            String memoryManageName = memoryManagerMXBean.getName();
+            // 内存管理器在JVM中是否有效
+            boolean isValid = memoryManagerMXBean.isValid();
+            System.out.println("内存池名称为：" + (memoryPoolNames) + "\n当前的内存管理器为：" + memoryManageName + "\n内存管理器在JVM中是否生效：" + isValid + "\n对象名为：" + memoryManagerMXBean.getObjectName().toString());
+            System.out.println();
+        }
+
+        /**
+         * JVM内存管理的bean
+         */
+        System.out.println("*****************JVM内存管理的bean*****************");
+        MemoryMXBean memoryMXBean = ManagementFactory.getMemoryMXBean();
+        // JVM用于对象分配的堆的当前内存使用情况
+        MemoryUsage heapMemoryUsage = memoryMXBean.getHeapMemoryUsage();
+        // JVM使用的非堆内存的当前内存使用情况
+        MemoryUsage nonHeapMemoryUsage = memoryMXBean.getNonHeapMemoryUsage();
+        // 待回收的对象的大致数目
+        long objectPendingFinalizationCount = memoryMXBean.getObjectPendingFinalizationCount();
+        // 是否启用了内存系统的详细输出
+        boolean isVerbose = memoryMXBean.isVerbose();
+        System.out.println("JVM用于对象分配的堆的当前内存使用情况：" + (heapMemoryUsage) + "\nJVM使用的非堆内存的当前内存使用情况：" + (nonHeapMemoryUsage) + "\n待回收的对象的大致数目：" + objectPendingFinalizationCount + "\n是否启用了内存系统的详细输出:" + isVerbose + "\n对象名为：" + memoryMXBean.getObjectName().toString());
+        System.out.println();
+
+        // 启用了内存系统的详细输出
+        memoryMXBean.setVerbose(true);
+        System.out.println("启用了内存系统的详细输出之后：\nJVM用于对象分配的堆的当前内存使用情况：" + (heapMemoryUsage) + "\nJVM使用的非堆内存的当前内存使用情况：" + (nonHeapMemoryUsage) + "\n待回收的对象的大致数目：" + objectPendingFinalizationCount + "\n是否启用了内存系统的详细输出:" + memoryMXBean.isVerbose() + "\n对象名为：" + memoryMXBean.getObjectName().toString());
+        System.out.println();
+
+        // 运行垃圾收集
+        memoryMXBean.gc();
+        System.out.println("启用了内存系统的详细输出之后，且运行垃圾收集之后：\nJVM用于对象分配的堆的当前内存使用情况：" + (heapMemoryUsage) + "\nJVM使用的非堆内存的当前内存使用情况：" + (nonHeapMemoryUsage) + "\n待回收的对象的大致数目：" + objectPendingFinalizationCount + "\n是否启用了内存系统的详细输出:" + memoryMXBean.isVerbose() + "\n对象名为：" + memoryMXBean.getObjectName().toString());
+        System.out.println();
+
+        /**
+         * JVM中MemoryPoolMXBean对象的列表
+         */
+        System.out.println("*****************JVM内存池中MemoryPoolMXBean对象*****************");
+        List<MemoryPoolMXBean> memoryPoolMXBeanList = ManagementFactory.getMemoryPoolMXBeans();
+        for (MemoryPoolMXBean memoryPoolMXBean : memoryPoolMXBeanList) {
+            // JVM最近在回收此内存池中未使用对象之后的内存使用情况
+//            MemoryUsage memoryUsage = memoryPoolMXBean.getCollectionUsage();
+            // 此内存池的集合使用阈值（字节）
+//            memoryPoolMXBean.setCollectionUsageThreshold(100000);
+//            long collectionUsageThreshold = memoryPoolMXBean.getCollectionUsageThreshold();
+            // JVM检测到内存使用率已达到或超过集合使用率阈值的次数
+//            long collectionUsageThresholdCount = memoryPoolMXBean.getCollectionUsageThresholdCount();
+            // 管理此内存池的内存管理器的名称。每个内存池至少由一个内存管理器管理。
             String[] memoryManagerNames = memoryPoolMXBean.getMemoryManagerNames();
-            MemoryType type = memoryPoolMXBean.getType();
-            MemoryUsage usage = memoryPoolMXBean.getUsage();
-            MemoryUsage peakUsage = memoryPoolMXBean.getPeakUsage();
-            memoryPoolMXBean.getCollectionUsage();
-            System.out.println(name + ":");
-            System.out.println("    managers: " + String.join(" , ", memoryManagerNames));
-            System.out.println("    type: " + type.toString());
-            System.out.print("    usage: " + usage.toString());
-            System.out.println("    Percentage: " + ((double) usage.getUsed() / usage.getCommitted()));
-            System.out.println("    peakUsage: " + peakUsage.toString());
-            System.out.println("");
-        });
-        dispatcher.heapHisto(pid);
-        dispatcher.getStack(pid);
+            // 当前内存池名称
+            String memoryPoolName = memoryPoolMXBean.getName();
+            // 自Java虚拟机启动或峰值重设以来此内存池的峰值内存使用量
+            MemoryUsage memoryUsage1 = memoryPoolMXBean.getPeakUsage();
+            // 内存池类型
+            MemoryType memoryType = memoryPoolMXBean.getType();
+            // 对此内存池的内存使用情况的估计值
+            MemoryUsage memoryUsage2 = memoryPoolMXBean.getUsage();
+            // 此内存池的使用阈值（字节）。每个内存池都有一个依赖于平台的默认阈值。
+//            long usageThreshold = memoryPoolMXBean.getUsageThreshold();
+            // 内存使用量超过使用阈值的次数
+//            long usageThresholdCount = memoryPoolMXBean.getUsageThresholdCount();
+            // JVM在最近一次回收之后内存使用情况是否达到或者超过回收使用阈值
+//            boolean isCollectionUsageThresholdExceeded = memoryPoolMXBean.isCollectionUsageThresholdExceeded();
+            // 内存池知否支持回收使用阈值
+            boolean isCollectionUsageThresholdSupported = memoryPoolMXBean.isCollectionUsageThresholdSupported();
+            // 内存池的内存使用是否达到或超过其使用阈值
+//            boolean isUsageThresholdExceeded = memoryPoolMXBean.isUsageThresholdExceeded();
+            // 内存池是否支持使用阈值
+            boolean isUsageThresholdSupported = memoryPoolMXBean.isUsageThresholdSupported();
+            // JVM中内存池是否有效
+            boolean isValid = memoryPoolMXBean.isValid();
+            // + "\n获得此内存池的集合使用阈值（字节数）：" + collectionUsageThreshold +  "\nJVM检测到内存使用率已达到或超过集合使用率阈值的次数:" + collectionUsageThresholdCount
+//            System.out.println("JVM最近在回收此内存池中未使用对象之后的内存使用情况:" + (memoryUsage));
+            System.out.println("管理此内存池的内存管理器的名称:" + Arrays.toString(memoryManagerNames) + "\n当前内存池名称:" + memoryPoolName + "\n自Java虚拟机启动或峰值重设以来此内存池的峰值内存使用量:" + (memoryUsage1));
+            //  + "\n此内存池的使用阈值（字节数）：" + usageThreshold + "\n内存使用量超过使用阈值的次数:" + usageThresholdCount
+            System.out.println("内存池类型：" + (memoryType) + "\n对此内存池的内存使用情况的估计值:" + (memoryUsage2));
+            // "JVM在最近一次回收之后内存使用情况是否达到或者超过回收使用阈值:" + isCollectionUsageThresholdExceeded + "\n内存池的内存使用是否达到或超过其使用阈值:" + isUsageThresholdExceeded +
+            System.out.println("内存池知否支持回收使用阈值:" + isCollectionUsageThresholdSupported + "\n内存池是否支持使用阈值:" + isUsageThresholdSupported + "\nJVM中内存池是否有效:" + isValid);
+            System.out.println("对象名为：" + memoryPoolMXBean.getObjectName().toString());
+            System.out.println();
+        }
+
+//        System.out.println((ManagementFactory.getPlatformMBeanServer()));
+        System.out.println("******************JVM在运行时管理的bean********************");
+        RuntimeMXBean runtimeMXBean = ManagementFactory.getRuntimeMXBean();
+        System.out.println("启动类路径：" + runtimeMXBean.getBootClassPath());
+        System.out.println("类路径：" + runtimeMXBean.getClassPath());
+        System.out.println("输入参数：" + runtimeMXBean.getInputArguments());
+        System.out.println("库路径：" + runtimeMXBean.getLibraryPath());
+        System.out.println("管理的具体版本：" + runtimeMXBean.getManagementSpecVersion());
+        System.out.println("主机名称：" + runtimeMXBean.getName());
+        System.out.println("JVM规范名称：" + runtimeMXBean.getSpecName());
+        System.out.println("JVM规范供应商：" + runtimeMXBean.getSpecVendor());
+        System.out.println("JVM规范版本：" + runtimeMXBean.getSpecVersion());
+        System.out.println("启动时间：" + runtimeMXBean.getStartTime());
+        System.out.println("系统属性：" + runtimeMXBean.getSystemProperties());
+        System.out.println("JVM正常运行时间：" + runtimeMXBean.getUptime());
+        System.out.println("JVM实现名称：" + runtimeMXBean.getVmName());
+        System.out.println("JVM实现供应商：" + runtimeMXBean.getVmVendor());
+        System.out.println("JVM实现版本：" + runtimeMXBean.getVmVersion());
+
+        System.out.println("\n******************JVM线程系统管理的bean********************");
+        System.out.println(ManagementFactory.getThreadMXBean());
+        ThreadMXBean threadMXBean = ManagementFactory.getThreadMXBean();
+        Method[] methods = threadMXBean.getClass().getDeclaredMethods();
+        System.out.println("死锁线程为：" + Arrays.toString(threadMXBean.findDeadlockedThreads()));
+        System.out.println("监控死锁线程为：" + Arrays.toString(threadMXBean.findMonitorDeadlockedThreads()));
+        System.out.println("所有的线程id为：" + Arrays.toString(threadMXBean.getAllThreadIds()));
+        System.out.println("当前线程占用的CPU时间为：" + threadMXBean.getCurrentThreadCpuTime());
+        System.out.println("当前线程在用户模式下执行的CPU时间（纳秒）为：" + threadMXBean.getCurrentThreadUserTime());
+        System.out.println("当前的实时守护进程线程数为：" + threadMXBean.getDaemonThreadCount());
+        System.out.println("自Java虚拟机启动或峰值重置后的活动线程计数峰值为：" + threadMXBean.getPeakThreadCount());
+        System.out.println("当前的活动线程数，包括守护进程和非守护进程线程为：" + threadMXBean.getThreadCount());
+        System.out.println("自Java虚拟机启动以来创建和启动的线程总数为：" + threadMXBean.getTotalStartedThreadCount());
+        System.out.println("对象名称为：" + threadMXBean.getObjectName());
+
+        System.out.println("\n******************java平台所有的管理监控接口********************");
+        Set<Class<? extends PlatformManagedObject>> classSet = ManagementFactory.getPlatformManagementInterfaces();
+        for (Class platformManagedObject : classSet) {
+            System.out.println(platformManagedObject);
+        }
+
     }
 }

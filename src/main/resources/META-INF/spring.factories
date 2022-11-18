@@ -1,2 +1,3 @@
 org.springframework.boot.autoconfigure.EnableAutoConfiguration=\
-  plus.jdk.monitor.global.MonitorAutoConfiguration
+  plus.jdk.monitor.global.MonitorMemoryAutoConfiguration,\
+  plus.jdk.monitor.global.MonitorGarbageAutoConfiguration
